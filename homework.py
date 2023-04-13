@@ -3,7 +3,9 @@ import requests
 import logging
 import time
 import telegram
+from http import HTTPStatus
 from dotenv import load_dotenv
+from exceptions import RequestError, ConnectError
 load_dotenv()
 
 
@@ -33,10 +35,7 @@ logger.addHandler(logging.StreamHandler())
 def check_tokens():
     """Проверяет наличие токена."""
     var_list = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    for var in var_list:
-        if not var:
-            return False
-    return True
+    return all(var_list)
 
 
 def send_message(bot, message):
@@ -50,33 +49,28 @@ def send_message(bot, message):
 
 def get_api_answer(timestamp):
     """Получает ответ от сервера."""
+    payload = {'from_date': timestamp}
     try:
-        payload = {'from_date': timestamp}
+        logging.debug('Отправка запроса к эндпоинту')
         response = requests.get(ENDPOINT, headers=HEADERS, params=payload)
-    except requests.exceptions.RequestException:
-        ('Ошибка сетевого соединения')
-    if response.status_code != 200:
-        logging.error('Сбой при запросе к эндпоинту')
-        raise Exception('Сбой при запросе к эндпоинту')
-    return response.json()
+        if response.status_code != HTTPStatus.OK:
+            raise RequestError('Ошибка при запросе к эндпоинту')
+        return response.json()
+    except Exception:
+        raise ConnectError('Ошибка сетевого соединения')
 
 
 def check_response(response):
     """Проверяет ответ сервера."""
-    if len(response) == 0:
-        logging.error('Ответ сервера содержит пустой словарь')
+    if not response:
         raise KeyError('Ответ сервера содержит пустой словарь')
     if not isinstance(response, dict):
-        logging.error('Тип данных - не словарь')
         raise TypeError('Тип данных - не словарь')
     if 'homeworks' not in response:
-        logging.error('отсутствует ожидаемый ключ homework')
         raise KeyError('отсутствует ожидаемый ключ homework')
     if 'current_date' not in response:
-        logging.error('отсутствует ожидаемый ключ current_date')
         raise KeyError('отсутствует ожидаемый ключ current_date')
     if not isinstance(response.get('homeworks'), list):
-        logging.error('Тип данных - не список')
         raise TypeError('Тип данных - не список')
     return response['homeworks']
 
@@ -84,21 +78,20 @@ def check_response(response):
 def parse_status(homework):
     """Поверяет статус домашней работы. Формирует сообщение для отправки."""
     if 'homework_name' not in homework:
-        logging.error('отсутствует ожидаемый ключ homework_name')
         raise Exception('отсутствует ожидаемый ключ homework_name')
     else:
         homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
     verdict = HOMEWORK_VERDICTS.get(homework_status)
     if homework_status not in HOMEWORK_VERDICTS:
-        logging.error('Неизвестный статус домашней работы')
         raise KeyError('Неизвестный статус домашней работы')
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def main() -> None:
     """Основная логика работы бота."""
-    error_message = {'error': None, }
+    error_message = None
+    status_message = None
     if not check_tokens():
         logging.critical('Отсутствуют обязательные пепеменные окружения./n'
                          'Работа программы завершена')
@@ -109,20 +102,20 @@ def main() -> None:
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
-            if len(homeworks) == 0:
-                logging.debug('В ответе отсутствуют новые статусы работы')
+            if not homeworks:
+                logging.debug('В ответе отсутствуют новые статусы работ')
             else:
-                for homework in homeworks:
-                    message = parse_status(homework)
+                message = parse_status(homeworks[0])
+                if status_message != message:
                     send_message(bot, message)
+                status_message = message
             timestamp = response.get('current_date')
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            if error_message['error'] != message:
+            logging.error(message)
+            if error_message != message:
                 send_message(bot, message)
-            error_message['error'] = message
-        else:
-            error_message['error'] = None
+            error_message = message
         finally:
             time.sleep(RETRY_PERIOD)
 
